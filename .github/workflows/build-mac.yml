@@ -1,0 +1,73 @@
+name: Build macOS installer
+
+on:
+  push:
+    branches: [ main ]
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+# a newer push replaces a build still running
+concurrency:
+  group: build-mac
+  cancel-in-progress: true
+
+jobs:
+  mac:
+    # Intel runner: arm64 runners queued for a long time and the macos-14 label
+    # is unsupported. Intel runners still build universal (arm64 + x86_64) binaries.
+    runs-on: macos-15-intel
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Read plug-in identity
+        run: |
+          get() { sed -nE "s/^set\($1 +\"([^\"]+)\".*/\1/p" plugin.cmake; }
+          echo "NAME=$(get PLUGIN_NAME)" >> "$GITHUB_ENV"
+          echo "BUNDLE=$(get PLUGIN_BUNDLE_ID)" >> "$GITHUB_ENV"
+          echo "VERSION=$(get PLUGIN_VERSION)" >> "$GITHUB_ENV"
+
+      - name: "Configure (universal: Apple Silicon + Intel)"
+        run: |
+          cmake -B build -G "Unix Makefiles" -DCMAKE_BUILD_TYPE=Release \
+            -DCMAKE_OSX_ARCHITECTURES="arm64;x86_64" \
+            -DCMAKE_OSX_DEPLOYMENT_TARGET=10.13 \
+            -DPLUGIN_BUILD_TESTS=ON
+
+      - name: Build
+        run: cmake --build build --config Release --target "${NAME}_VST3" EngineTests -j 4
+
+      - name: Run engine tests
+        run: ./build/EngineTests_artefacts/Release/EngineTests
+
+      - name: Sign (ad-hoc) and package
+        run: |
+          VST="build/${NAME}_artefacts/Release/VST3/${NAME}.vst3"
+          lipo -info "$VST/Contents/MacOS/${NAME}"
+          codesign --force --deep --sign - "$VST"
+          codesign --verify --verbose "$VST"
+          (cd "$(dirname "$VST")" && ditto -c -k --keepParent "${NAME}.vst3" "$GITHUB_WORKSPACE/${NAME}.vst3.zip")
+          scripts/make-pkg.sh "$VST" "$NAME" "$BUNDLE" "$VERSION" "${NAME}-Installer.pkg"
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: ${{ env.NAME }}-macOS
+          path: |
+            ${{ env.NAME }}-Installer.pkg
+            ${{ env.NAME }}.vst3.zip
+
+      - name: Publish to "latest" release
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: latest
+          name: ${{ env.NAME }} (latest build)
+          make_latest: true
+          files: |
+            ${{ env.NAME }}-Installer.pkg
+            ${{ env.NAME }}.vst3.zip
+          body: |
+            **${{ env.NAME }}-Installer.pkg**: double-click to install ${{ env.NAME }}.vst3 into /Library/Audio/Plug-Ins/VST3.
+            If macOS says it can't verify the developer: System Settings → Privacy & Security → Open Anyway.
+            Then rescan plug-ins in Ableton (Settings → Plug-Ins → Rescan).
+            Universal binary (Apple Silicon + Intel). Version ${{ env.VERSION }}, commit ${{ github.sha }}.

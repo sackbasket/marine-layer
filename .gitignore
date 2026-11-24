@@ -1,0 +1,5 @@
+build/
+*.pkg
+snapshot.png
+build-config.log
+.DS_Store
